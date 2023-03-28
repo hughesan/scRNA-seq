@@ -1,0 +1,579 @@
+---
+title: "Integrating 6 dpf WBIS batches"
+author: "Alexandria Hughes"
+date: "9/7/2021 - 10/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+## WBIS overview
+
+Copied WBIS_AH_filtered from WBIS share data with the following modifications:
+
+  + Filtered data to keep only zv11 for each main folder
+  + Deleted cloupe.cloupe for each
+  + Some folders have unfiltered_bc_matrices; deleted to keep only filtered_bc_matrices
+  + Making the assumption now that individual main branch folders are biological replicates and none of these are technical reps or reruns of the same cells or anything else not independent (can easily fix later; espec _oldkit _newkit named folders)
+  + 15 folders
+  + within zv11 eliminated unzipped mtx and tsv files (kept only gzipped .gz for all)
+
+### Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+#bioconductor packages: install with bioclite manager
+library(SingleCellExperiment)
+library(BiocSingular)
+library(igraph)
+library(batchelor)
+library(scater)
+library(scran)
+
+#cran packages: install.packages('uwot') 
+library(uwot)
+library(patchwork)
+```
+
+
+## Bring in each dataset in, expand to sparse, and convert to SingleCellExperiment object
+
+This is pretty repetitive with 15 datasets so write a function, `dir_to_sce` that will take care of this for each matrix directory, then run on each directory
+
+#### dir_to_sce function
+```{r}
+dir_to_sce <- function(matdir, scename){
+  barcode.path = paste0(matdir, "barcodes.tsv.gz")
+  features.path = paste0(matdir, "features.tsv.gz")
+  matrix.path = paste0(matdir, "matrix.mtx.gz")
+
+  mat <- readMM(matrix.path)
+
+  feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+  barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+  colnames(mat) <- barcode.names$V1
+  rownames(mat) <- feature.names$V2
+
+  scename <- SingleCellExperiment(assays = list(counts = mat))
+  rm(mat)
+  
+  return(scename)
+}
+```
+
+### run dir_to_sce
+
+Make all 15 sce objects - folder organization made this obnoxious to loop through:
+
+```{r}
+sce_2017_1001_10k <- dir_to_sce("WBIS_AH_filtered/2017_1001_10k/zv11/filtered_feature_bc_matrix/")
+sce_2017_1001_3k <- dir_to_sce("WBIS_AH_filtered/2017_1001_3k/zv11/filtered_feature_bc_matrix/")
+sce_2018_0301_actD <- dir_to_sce("WBIS_AH_filtered/2018_0301_actD/zv11/filtered_feature_bc_matrix/")
+sce_2018_0608_xa195_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0608_xa195_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2018_0815_xa104_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0815_xa104_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2018_0815_xa224_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0815_xa224_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2018_0815_xa244_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0815_xa244_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2018_0815_xa395_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0815_xa395_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2018_0815_xa68_3tg <- dir_to_sce("WBIS_AH_filtered/2018_0815_xa68_3tg/zv11/filtered_feature_bc_matrix/")
+sce_2019_0627_HBSS <- dir_to_sce("WBIS_AH_filtered/2019_0627_HBSS/zv11/filtered_feature_bc_matrix/")
+sce_2019_0627_PBS <- dir_to_sce("WBIS_AH_filtered/2019_0627_PBS/zv11/filtered_feature_bc_matrix/")
+sce_2019_0820_TTT_newkit <- dir_to_sce("WBIS_AH_filtered/2019_0820_TTT_newkit/zv11/filtered_feature_bc_matrix/")
+sce_2019_0820_TTT_oldkit <- dir_to_sce("WBIS_AH_filtered/2019_0820_TTT_oldkit/zv11/filtered_feature_bc_matrix/")
+sce_2019_0820_xa74_TTT_newkit <- dir_to_sce("WBIS_AH_filtered/2019_0820_xa74_TTT_newkit/zv11/filtered_feature_bc_matrix/")
+sce_2019_0820_xa74_TTT_oldkit <- dir_to_sce("WBIS_AH_filtered/2019_0820_xa74_TTT_oldkit/zv11/filtered_feature_bc_matrix/")
+
+```
+
+
+Make of list of these sces so we can use lapply later instead of loops:
+```{r}
+sce_list <- list(sce_2017_1001_10k, sce_2017_1001_3k, sce_2018_0301_actD, sce_2018_0608_xa195_3tg, sce_2018_0815_xa104_3tg, sce_2018_0815_xa224_3tg, sce_2018_0815_xa244_3tg, sce_2018_0815_xa395_3tg, sce_2018_0815_xa68_3tg, sce_2019_0627_HBSS, sce_2019_0627_PBS, sce_2019_0820_TTT_newkit, sce_2019_0820_TTT_oldkit, sce_2019_0820_xa74_TTT_newkit, sce_2019_0820_xa74_TTT_oldkit)
+```
+
+
+### 1. Quality control
+
+First identify mitochondrial genes so that we can eliminate cells expressing too many (>5%)
+
+An important pre-check is whether all of the sce objects are using the same gene list
+
+```{r}
+length(rownames(sce_2017_1001_10k)) #genes are the rows so rownames=genes
+length(rownames(sce_2017_1001_3k))
+length(intersect(rownames(sce_2017_1001_10k), rownames(sce_2017_1001_3k)))
+```
+
+**Although these two sces have the same number of genes, they are not the same genes! Only 29074/32526 overlap (all are zv11 so this is odd). Let's expand this intersection to all 15 sces and subset each sce to keep the common genes only.
+
+intersect() apparently only takes two arguments, but general with: Reduce(intersect, list(rownames(), rownames(),...))
+```{r}
+commongenes <- Reduce(intersect, list(rownames(sce_2017_1001_10k), rownames(sce_2017_1001_3k), rownames(sce_2018_0301_actD), rownames(sce_2018_0608_xa195_3tg), rownames(sce_2018_0815_xa104_3tg), rownames(sce_2018_0815_xa224_3tg), rownames(sce_2018_0815_xa244_3tg), rownames(sce_2018_0815_xa395_3tg), rownames(sce_2018_0815_xa68_3tg), rownames(sce_2019_0627_HBSS), rownames(sce_2019_0627_PBS), rownames(sce_2019_0820_TTT_newkit), rownames(sce_2019_0820_TTT_oldkit), rownames(sce_2019_0820_xa74_TTT_newkit), rownames(sce_2019_0820_xa74_TTT_oldkit)))
+
+length(commongenes)
+```
+
+Subset: to do this with a list the output has to be a list, also (here newList) 
+```{r}
+newList = lapply(sce_list, function(x)
+  {x[commongenes,]
+  } )
+```
+
+```{r}
+newList[1]
+```
+
+```{r}
+is.mito <- grepl("^mt-", commongenes)
+```
+
+
+```{r}
+qclist = lapply(newList, function(x){perCellQCMetrics(x, subsets=list(Mito=is.mito))})
+filtlist = lapply(qclist, function(x){quickPerCellQC(x, percent_subsets="subsets_Mito_percent")})
+```
+
+want to take each element of newList and add a column, $discard, from the same-index corresponding element in filtlist
+```{r}
+
+for(i in 1:length(newList)){
+  newList[[i]]$discard <- filtlist[[i]]$discard
+}
+```
+
+```{r}
+#newList[[1]]
+#length(newList)
+newList[[1]]
+```
+
+Discard rates for each batch (discard == TRUE indicates >5% mito or library <200 genes):
+
+!!data sets 5 and 6 may be identical!! Same n of T/F cells v unlikely
+
+```{r}
+for(i in 1:length(newList)){
+  print(summary(newList[[i]]$discard))
+}
+```
+
+This was weird because S4 objects are weird - keep all rows and only those columns (cells) with discard status false.
+```{r}
+postqclist = lapply(newList, function(x){x[,which(x$discard == FALSE)]})
+```
+
+It did not run over newList. newList still contains info about mito/discard status.
+```{r}
+postqclist[1]
+newList[1]
+```
+
+
+```{r}
+for(i in 1:length(newList)){
+  print(summary(postqclist[[i]]$discard))
+}
+```
+
+### 2. Normalization
+
+```{r}
+postnormlist = lapply(postqclist, logNormCounts)
+```
+
+```{r}
+postnormlist[5]
+```
+
+
+### 3. Highly variable gene selection
+
+hvglist keeps hvgs separate for / unique to each batch
+```{r}
+declist = lapply(postnormlist, modelGeneVar)
+
+#hvg <- getTopHVGs(dec, fdr.threshold = 0.05)
+
+hvglist = lapply(declist, function(x){
+  getTopHVGs(x, fdr.threshold = 0.05)
+  })
+```
+
+```{r}
+declist[1]
+```
+
+Kinda dig the idea of showing highly variable gene names but this is messy in practice:
+
+```{r}
+sampledecdf <- as.data.frame(declist[1])
+
+ggplot(sampledecdf, aes(x=mean, y=total, label=rownames(sampledecdf)))+
+  geom_text()+
+  geom_smooth()+
+  labs(x="Mean log-expression",y="Variance")
+
+```
+How many PCs?
+```{r}
+#pctest <- denoisePCA(postnormlist[1], declist[1], subset.row=getTopHVGs(declist[1], fdr.threshold = 0.05))
+#ncol(reducedDim(pctest, "PCA"))
+```
+
+
+### 4. Dim reduction
+
+#### How many PCs? We'll use denoisePCA() to select the number automatically for each batch
+
+Test run since subsetting S4 objects is weird. Need two sets of brackets to grab from the list of 15 held in each of the relevant containers
+```{r}
+sce1 <- postnormlist[[1]] #this is the post-normalized list of sces
+dec1 <- declist[[1]] #variable genes for each of the 15 sces
+hvg1 <- hvglist[[1]] #highly (fdr.thresh 0.05) variable genes for each of the 15 sces
+```
+
+```{r}
+pctest <- denoisePCA(sce1, dec1, subset.row=getTopHVGs(dec1, fdr.threshold = 0.05))
+print(ncol(reducedDim(pctest, "PCA")))
+```
+
+Do for all 15 and put number of PCs in a vector
+```{r}
+pcvec <- rep(0,15)
+
+for(a in 1:15){
+  pcp <- denoisePCA(postnormlist[[a]], declist[[a]], subset.row=getTopHVGs(declist[[a]], fdr.threshold = 0.05))
+  pcvec[a] <- print(ncol(reducedDim(pcp, "PCA")))}
+
+pcvec
+```
+#### runPCA and runUMAP loop
+```{r}
+for(a in 1:15){
+  postnormlist[[a]] <- runPCA(postnormlist[[a]], ncomponents = pcvec[a], subset_row = hvglist[[a]])
+  postnormlist[[a]] <- runUMAP(postnormlist[[a]], dimred = 'PCA', external_neighbors=TRUE)
+}
+                  
+```
+
+fuck yes works great
+```{r}
+postnormlist[[2]]
+```
+## *Load steps following this
+
+*note to remove some of the unnecessary lists maybe
+
+the sces can be cbind'd only if PC #s match or PCs are removed like this example
+```{r}
+ a <-postnormlist[[1]]
+ b <- postnormlist[[10]]
+# 
+# a$batch <- "batch1"
+# b$batch <- "batch2"
+# 
+# reducedDims(a) <- NULL
+# reducedDims(b) <- NULL
+# 
+# testcbind <- cbind(a,b)
+```
+
+
+```{r}
+plotPCA(postnormlist[[14]], ncomponents=3)
+```
+
+
+### 5. Clustering
+
+
+```{r}
+for(a in 1:length(postnormlist)){
+  g <- buildSNNGraph(postnormlist[[a]], use.dimred = 'PCA')
+  colLabels(postnormlist[[a]]) <- factor(igraph::cluster_louvain(g)$membership)
+  }
+```
+
+```{r}
+postnormlist[[2]]
+```
+### 6. Vis
+
+```{r}
+plotPCA(postnormlist[[8]], ncomponents = 3, colour_by = "label")
+```
+
+Noted earlier (discard status table) but evident here, too: data sets 5 and 6 are the same
+```{r}
+plotUMAP(postnormlist[[5]], colour_by = "label") + plotUMAP(postnormlist[[6]], colour_by = "label")
+```
+## Find batch effects: uncorrected merge
+
+Here we start from the post-QC data, label batches then merge into one, normalize, hvg, dim red, clustering and vis with batches labeled. This should be the 'same' as previous 6 dpf analysis but this time we know the batch identities.
+
+merge the data (will need to normalize again, but this needs to happen pre-PCA because each sce object had a different number of PCs)
+
+```{r}
+postqclist[[1]]$batch <- "wbis_1"
+postqclist[[2]]$batch <- "wbis_2"
+postqclist[[3]]$batch <- "wbis_3"
+postqclist[[4]]$batch <- "wbis_4"
+postqclist[[5]]$batch <- "wbis_5"
+postqclist[[7]]$batch <- "wbis_7"
+postqclist[[8]]$batch <- "wbis_8"
+postqclist[[9]]$batch <- "wbis_9"
+postqclist[[10]]$batch <- "wbis_10"
+postqclist[[11]]$batch <- "wbis_11"
+postqclist[[12]]$batch <- "wbis_12"
+postqclist[[13]]$batch <- "wbis_13"
+postqclist[[14]]$batch <- "wbis_14"
+postqclist[[15]]$batch <- "wbis_15"
+
+```
+
+
+```{r}
+uncorrected_merge <- cbind(postqclist[[1]],postqclist[[2]],postqclist[[3]],postqclist[[4]],postqclist[[5]],postqclist[[7]],postqclist[[8]],postqclist[[9]],postqclist[[10]],postqclist[[11]],postqclist[[12]],postqclist[[13]],postqclist[[14]],postqclist[[15]])
+```
+
+
+### 2.2 Normalize
+
+```{r}
+uncorrected_merge <- logNormCounts(uncorrected_merge)
+```
+
+### 2.3 Feature selection
+
+```{r}
+decuncorr <- modelGeneVar(uncorrected_merge)
+hvguncorr <- getTopHVGs(decuncorr, fdr.threshold = 0.05)
+```
+
+### 2.4 Dimred
+
+#### How many PCs
+
+```{r}
+sced <- denoisePCA(uncorrected_merge, decuncorr, subset.row=getTopHVGs(decuncorr, fdr.threshold = 0.05))
+npcs <- ncol(reducedDim(sced, "PCA"))
+npcs
+```
+```{r}
+uncorrected_merge <- runPCA(uncorrected_merge, ncomponents=npcs, subset_row=hvguncorr)
+uncorrected_merge <- runUMAP(uncorrected_merge, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+### 2.5 Clustering
+
+```{r}
+set.seed(1357)
+g <- buildSNNGraph(uncorrected_merge, use.dimred = 'PCA')
+colLabels(uncorrected_merge) <- factor(igraph::cluster_louvain(g)$membership)
+```
+
+
+### 2.6 Vis
+
+```{r}
+a <-plotUMAP(uncorrected_merge, colour_by = "label", text_by = "label")+ #also did patchwork PCA
+  theme(text = element_text(size=10),
+        axis.text = element_text(size=10),
+        legend.text=element_text(size=6),
+        #legend.title = element_blank(),
+        legend.position= "top")+
+  guides(color=guide_legend(title="Cluster", title.position="top"))
+
+
+b <- plotUMAP(uncorrected_merge, colour_by = "batch", text_by = "label")+
+  theme(text = element_text(size=10),
+        axis.text = element_text(size=10),
+        legend.text=element_text(size=6),
+        #legend.title = element_blank(),
+        legend.position= "top")+
+  guides(color=guide_legend(title="Batch", title.position="top")) 
+
+a + b
+
+ggsave('WBIS_AH_filtered/uncorr-umap-1-2-patchwork.png', dpi=300)
+ # scale_color_discrete(labels =c ("1", "2","3", "4", "5", "6","7", "8", "9", "10", "11", "12", "13","14"))
+```
+```{r}
+plotUMAP(uncorrected_merge, colour_by = "label", text_by = "label")+
+  theme(text = element_text(size=10),
+        axis.text = element_text(size=10),
+        legend.text=element_text(size=6),
+        #legend.title = element_blank(),
+        legend.position= "top")+
+  guides(color=guide_legend(title="Cluster", title.position="top"))
+```
+```{r}
+uncorrected_merge
+```
+
+Batch effect clear in 1st PC: notice striated batch coloration along 1st PC:
+```{r}
+plotPCA(uncorrected_merge, ncomponents=3, colour_by = "batch")+
+  theme(text = element_text(size=12),
+        axis.text = element_text(size=12),
+       #legend.title = element_text("Batch"),
+        legend.position= "left")+
+  guides(color=guide_legend(title="Batch"))
+  #scale_color_discrete(labels =c ("1", "2","3", "4", "5", "6","7", "8", "9", "10", "11", "12", "13","14"))
+
+#ggsave('WBIS_AH_filtered/uncorrmerge-PCA-3comp-batch.png', dpi=300)
+```
+```{r}
+clustuncor <- igraph::cluster_louvain(g)$membership
+```
+
+
+```{r}
+tabuncor <- table(Clusters=clustuncor, Batch=uncorrected_merge$batch)
+tabuncor
+```
+```{r}
+as.data.frame(tabuncor) %>% ggplot(aes(x=Batch, Freq, fill=Clusters))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")
+```
+
+
+```{r}
+vars <- getVarianceExplained(uncorrected_merge, 
+    variables=c("label", "batch", "sizeFactor"))
+head(vars)
+```
+
+
+
+```{r}
+plotExplanatoryVariables(vars)
+```
+
+
+## MNN batch correction
+
+### 3.3 Feature selection
+
+Choose the highly variable genes by averaging the variances of genes identified in each batch's declist (modelGeneVar ran on each batch's post-qc normed counts)
+```{r}
+combineddec <- combineVar(declist)
+chosenhvgs <- combineddec$bio > 0
+sum(chosenhvgs)
+```
+```{r}
+combineddec
+```
+
+
+### 3.4 Dimred (Fast MNN)
+
+```{r}
+set.seed(1000101001)
+mnn_6dpf <- fastMNN(postnormlist[[1]], postnormlist[[2]], postnormlist[[3]], postnormlist[[4]], postnormlist[[5]], postnormlist[[7]], postnormlist[[8]],postnormlist[[9]],postnormlist[[10]],postnormlist[[11]],postnormlist[[12]],postnormlist[[13]],postnormlist[[14]],postnormlist[[15]],
+                  d=50, k=20, subset.row=chosenhvgs,
+    BSPARAM=BiocSingular::RandomParam(deferred=TRUE))
+mnn_6dpf
+```
+
+
+
+### 3.5 Clustering
+
+```{r}
+snngrm <- buildSNNGraph(mnn_6dpf, use.dimred="corrected")
+clustersmnn <- igraph::cluster_louvain(snngrm)$membership
+colLabels(mnn_6dpf) <- factor(clustersmnn)
+```
+
+```{r}
+tabmnn <- table(Cluster=clustersmnn, Batch=mnn_6dpf$batch)
+tabmnn
+```
+
+```{r}
+mnndf <- as.data.frame(tabmnn)
+```
+
+```{r}
+ggplot(mnndf, aes(x=Batch, Freq, fill=Cluster))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")
+```
+### 3.6 Vis
+
+```{r}
+mnn_6dpf <- runUMAP(mnn_6dpf, dimred="corrected")
+mnn_6dpf$batch <- factor(mnn_6dpf$batch)
+```
+
+
+```{r}
+plotUMAP(mnn_6dpf, colour_by = "batch", text_by = "label")
+```
+```{r}
+c <-plotUMAP(mnn_6dpf, colour_by = "label", text_by = "label")+ #also did patchwork PCA
+  theme(text = element_text(size=10),
+        axis.text = element_text(size=10),
+        legend.text=element_text(size=6),
+        #legend.title = element_blank(),
+        legend.position= "top")+
+  guides(color=guide_legend(title="Cluster", title.position="top"))
+
+
+d <- plotUMAP(mnn_6dpf, colour_by = "batch", text_by = "label")+
+  theme(text = element_text(size=10),
+        axis.text = element_text(size=10),
+        legend.text=element_text(size=6),
+        #legend.title = element_blank(),
+        legend.position= "top")+
+  guides(color=guide_legend(title="Batch", title.position="top")) 
+
+c + d
+
+#ggsave('WBIS_AH_filtered/WBIS-plots/mnn-1-2-patch-umap.png', dpi=300)
+```
+
+#### 3.6.2 Add counts back to cells
+
+MNN discards counts and logcounts for genes that aren't used for clustering and distorts the count information for those genes that are kept. To visualize counts on the MNN visualizations we would prefer to view original counts or logcounts rather than these distorted counts. Also, to identify marker genes for clusters, we need the original count data. 
+
+Note that plotUMAP(..., colour_by = "genename") calls the original count data and will throw an error rather than display distorted count data, which is a nice feature.
+
+```{r}
+liluniverse <- intersect(rownames(uncorrected_merge), rownames(mnn_6dpf)) 
+length(liluniverse)
+```
+
+```{r}
+uncorr_for_mnn <- uncorrected_merge[liluniverse,]
+assays(mnn_6dpf) <- assays(uncorr_for_mnn)
+```
+
+```{r}
+plotUMAP(mnn_6dpf, colour_by = "DsRed", text_by = "label", text_colour = "magenta")
+```
+
+
+```{r}
+#save.image(file = "WBIS_AH_filtered/2021-9-7.RData", compress = FALSE)
+```
+
+
+```{r}
+#load("WBIS_AH_filtered/2021-9-7.RData")
+```
+

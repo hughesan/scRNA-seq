@@ -1,0 +1,1483 @@
+---
+title: "5 dpf Raj et al. 2020 samples"
+author: "Alexandria Hughes"
+date: "7/7/2021"
+output: html_document
+---
+
+load last session and libraries, then set to pick up with plotting copies of slc6a1b
+
+In this document:
+
+  + Load all the 5 dpf Raj GEO sets (9 of them)
+  + Uncorrmerge of the 9 (there is an astro subclustering that follows this but ignore, it's not the good one)
+  + Batch correction with batchelor multiBatchNorm and rescaleBatches
+  + Astro subcluster (19) - cluster 19 of rescaled (rescaleBatches-corrected)
+  + Some asides / data wrangling to grab #s of cells containing multiple glial or other transcripts
+  + Satterstrom genes x batch corr clusters
+  + MNN batch correction
+  
+
+```{r}
+load('plots_5dpf_Raj/slc6a1b-plots-clusterfraction-2021-8-5.RData')
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(tidyverse)
+library(Matrix)
+
+library(SingleCellExperiment)
+library(BiocSingular)
+library(batchelor)
+library(scater)
+library(scran)
+library(uwot)
+
+library(viridis)
+library(cowplot)
+library(patchwork)
+```
+
+### Read in and make `SingleCellExperiment` objects for each of the nine 5dpf samples (each stored in its own dir_GEO-accession):
+remove matrix after to save space
+
+GSM4793213_zBr5dpf1_S7: 32191 genes, 2358 cells
+
+renamed within directory to drop name prefix ("GSM4793213_zBr5dpf1_S7-") matrix.mtx.gz, genes.tsv.gz, barcodes.tsv.gz
+```{r}
+matrix_dir = "dir_GSM4793213_zBr5dpf1_S7/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+#matrix.path <- paste0(matrix_dir, "matrix.mtx")
+
+mat5_S7 <- readMM("dir_GSM4793213_zBr5dpf1_S7/matrix.mtx.gz") 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S7) <- barcode.names$V1
+rownames(mat5_S7) <- feature.names$V2
+
+#Now convert to SCE object and remove matrix (v big)
+sce5_1s7 <- SingleCellExperiment(assays = list(counts = mat5_S7))
+rm(mat5_S7)
+```
+
+GSM4793221_comb-zBr5dpf9_S6
+```{r}
+matrix_dir = "dir_GSM4793221_zBr5dpf9_S6/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat5_S6 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S6) <- barcode.names$V1
+rownames(mat5_S6) <- feature.names$V2
+
+sce5_9s6 <- SingleCellExperiment(assays = list(counts = mat5_S6))
+rm(mat5_S6)
+```
+
+GSM4793220_comb-zBr5dpf8_S5
+```{r}
+matrix_dir = "dir_GSM4793220_comb-zBr5dpf8_S5/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat5_S5 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S5) <- barcode.names$V1
+rownames(mat5_S5) <- feature.names$V2
+
+sce5_8s5 <- SingleCellExperiment(assays = list(counts = mat5_S5))
+rm(mat5_S5)
+```
+
+
+GSM4793219_comb-zBr5dpf7_S4
+```{r}
+matrix_dir = "dir_GSM4793219_comb-zBr5dpf7_S4/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat5_S4 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S4) <- barcode.names$V1
+rownames(mat5_S4) <- feature.names$V2
+
+sce5_7s4 <- SingleCellExperiment(assays = list(counts = mat5_S4))
+rm(mat5_S4)
+```
+
+GSM4793218_comb-zBr5dpf6_S3
+```{r}
+matrix_dir = "dir_GSM4793218_comb-zBr5dpf6_S3/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat5_S3 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S3) <- barcode.names$V1
+rownames(mat5_S3) <- feature.names$V2
+
+sce5_6s3 <- SingleCellExperiment(assays = list(counts = mat5_S3))
+rm(mat5_S3)
+```
+
+GSM4793217_comb-zBr5dpf5_S2
+```{r}
+matrix_dir = "dir_GSM4793217_comb-zBr5dpf5_S2/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat5_S2 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat5_S2) <- barcode.names$V1
+rownames(mat5_S2) <- feature.names$V2
+
+sce5_5s2 <- SingleCellExperiment(assays = list(counts = mat5_S2))
+rm(mat5_S2)
+```
+
+GSM4793216_comb-zBr5dpf4_S1
+```{r}
+matrix_dir = "dir_GSM4793216_comb-zBr5dpf4_S1//"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat_4s1 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat_4s1) <- barcode.names$V1
+rownames(mat_4s1) <- feature.names$V2
+
+sce5_4s1 <- SingleCellExperiment(assays = list(counts = mat_4s1))
+rm(mat_4s1)
+```
+
+GSM4793215_zBr5dpf3_S4
+```{r}
+matrix_dir = "dir_GSM4793215_zBr5dpf3_S4/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat_3s4 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat_3s4) <- barcode.names$V1
+rownames(mat_3s4) <- feature.names$V2
+
+sce5_3s4 <- SingleCellExperiment(assays = list(counts = mat_3s4))
+rm(mat_3s4)
+```
+
+```{r}
+matrix_dir = "dir_GSM4793214_zBr5dpf2_S3/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+features.path <- paste0(matrix_dir, "genes.tsv.gz")
+matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+
+mat_2s3 <- readMM(matrix.path) 
+
+feature.names <- read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names <- read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+
+colnames(mat_2s3) <- barcode.names$V1
+rownames(mat_2s3) <- feature.names$V2
+
+sce5_2s3 <- SingleCellExperiment(assays = list(counts = mat_2s3))
+rm(mat_2s3)
+```
+
+
+
+Make a list 
+```{r}
+all5dpfsces <- list(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6)
+```
+
+
+
+
+1. Quality control
+
+This is stupid but it works. Can't loop through list of S4 objects???
+```{r}
+is.mito1 <- grepl("^mt-", rownames(sce5_1s7)) 
+qcstats1 <- perCellQCMetrics(sce5_1s7, subsets=list(Mito=is.mito1))
+filtered1 <- quickPerCellQC(qcstats1, percent_subsets="subsets_Mito_percent")
+sce5_1s7$discard <- filtered1$discard
+```
+
+```{r}
+is.mito2 <- grepl("^mt-", rownames(sce5_2s3)) 
+qcstats2 <- perCellQCMetrics(sce5_2s3, subsets=list(Mito=is.mito2))
+filtered2 <- quickPerCellQC(qcstats2, percent_subsets="subsets_Mito_percent")
+sce5_2s3$discard <- filtered2$discard
+```
+
+```{r}
+is.mito3 <- grepl("^mt-", rownames(sce5_3s4)) 
+qcstats3 <- perCellQCMetrics(sce5_3s4, subsets=list(Mito=is.mito3))
+filtered3 <- quickPerCellQC(qcstats3, percent_subsets="subsets_Mito_percent")
+sce5_3s4$discard <- filtered3$discard
+```
+
+```{r}
+is.mito4 <- grepl("^mt-", rownames(sce5_4s1)) 
+qcstats4 <- perCellQCMetrics(sce5_4s1, subsets=list(Mito=is.mito4))
+filtered4 <- quickPerCellQC(qcstats4, percent_subsets="subsets_Mito_percent")
+sce5_4s1$discard <- filtered4$discard
+```
+
+```{r}
+is.mito5 <- grepl("^mt-", rownames(sce5_5s2)) 
+qcstats5 <- perCellQCMetrics(sce5_5s2, subsets=list(Mito=is.mito5))
+filtered5 <- quickPerCellQC(qcstats5, percent_subsets="subsets_Mito_percent")
+sce5_5s2$discard <- filtered5$discard
+```
+
+```{r}
+is.mito6 <- grepl("^mt-", rownames(sce5_6s3)) 
+qcstats6 <- perCellQCMetrics(sce5_6s3, subsets=list(Mito=is.mito6))
+filtered6 <- quickPerCellQC(qcstats6, percent_subsets="subsets_Mito_percent")
+sce5_6s3$discard <- filtered6$discard
+```
+
+```{r}
+is.mito7 <- grepl("^mt-", rownames(sce5_7s4)) 
+qcstats7 <- perCellQCMetrics(sce5_7s4, subsets=list(Mito=is.mito7))
+filtered7 <- quickPerCellQC(qcstats7, percent_subsets="subsets_Mito_percent")
+sce5_7s4$discard <- filtered7$discard
+```
+
+```{r}
+is.mito8 <- grepl("^mt-", rownames(sce5_8s5)) 
+qcstats8 <- perCellQCMetrics(sce5_8s5, subsets=list(Mito=is.mito8))
+filtered8 <- quickPerCellQC(qcstats8, percent_subsets="subsets_Mito_percent")
+sce5_8s5$discard <- filtered8$discard
+```
+
+```{r}
+is.mito9 <- grepl("^mt-", rownames(sce5_9s6)) 
+qcstats9 <- perCellQCMetrics(sce5_9s6, subsets=list(Mito=is.mito9))
+filtered9 <- quickPerCellQC(qcstats9, percent_subsets="subsets_Mito_percent")
+sce5_9s6$discard <- filtered9$discard
+```
+
+
+addPerCellQC doesn't work with lapply :| so also v redundant
+```{r}
+sce5_1s7 <- addPerCellQC(sce5_1s7, subsets=list(Mito=grep("mt-", rownames(sce5_1s7))))
+sce5_2s3 <- addPerCellQC(sce5_2s3, subsets=list(Mito=grep("mt-", rownames(sce5_2s3))))
+
+sce5_3s4 <- addPerCellQC(sce5_3s4, subsets=list(Mito=grep("mt-", rownames(sce5_3s4))))
+
+sce5_4s1 <- addPerCellQC(sce5_4s1, subsets=list(Mito=grep("mt-", rownames(sce5_4s1))))
+sce5_5s2 <- addPerCellQC(sce5_5s2, subsets=list(Mito=grep("mt-", rownames(sce5_5s2))))
+sce5_6s3 <- addPerCellQC(sce5_6s3, subsets=list(Mito=grep("mt-", rownames(sce5_6s3))))
+sce5_7s4 <- addPerCellQC(sce5_7s4, subsets=list(Mito=grep("mt-", rownames(sce5_7s4))))
+sce5_8s5 <- addPerCellQC(sce5_8s5, subsets=list(Mito=grep("mt-", rownames(sce5_8s5))))
+sce5_9s6 <- addPerCellQC(sce5_9s6, subsets=list(Mito=grep("mt-", rownames(sce5_9s6))))
+
+```
+
+**Run all chunks above** troubleshooting 7-15
+
+Library size, genes detected, etc summaries:
+```{r}
+summary(sce5_6s3$sum)
+```
+
+
+#### Uncorrected merging
+
+2. Normalize and log2 transform the counts
+```{r}
+sce5_1s7 <- logNormCounts(sce5_1s7)
+sce5_2s3 <- logNormCounts(sce5_2s3)
+sce5_3s4 <- logNormCounts(sce5_3s4)
+sce5_4s1 <- logNormCounts(sce5_4s1)
+sce5_5s2 <- logNormCounts(sce5_5s2)
+sce5_6s3 <- logNormCounts(sce5_6s3)
+sce5_7s4 <- logNormCounts(sce5_7s4)
+sce5_8s5 <- logNormCounts(sce5_8s5)
+sce5_9s6 <- logNormCounts(sce5_9s6)
+```
+
+
+cbind uncorrected merge all the separate sces after log transforming
+```{r}
+universe <- intersect(rownames(sce5_1s7), rownames(sce5_6s3)) #intersect only works pairwise so supes tedious but all pairs give length 29147 so same genes
+# length(universe) #29147 is odd because I would think same genes across all? and all have same n rows 32191
+
+sce5_1s7 <- sce5_1s7[universe,]
+sce5_2s3 <- sce5_2s3[universe,]
+sce5_3s4 <- sce5_3s4[universe,]
+sce5_4s1 <- sce5_4s1[universe,]
+sce5_5s2 <- sce5_5s2[universe,]
+sce5_6s3 <- sce5_6s3[universe,]
+sce5_7s4 <- sce5_7s4[universe,]
+sce5_8s5 <- sce5_8s5[universe,]
+sce5_9s6 <- sce5_9s6[universe,]
+```
+
+```{r}
+sce5_1s7$batch <- "1s7"
+sce5_2s3$batch <- "2s3"
+sce5_3s4$batch <- "3s4"
+sce5_4s1$batch <- "4s1"
+sce5_5s2$batch <- "5s2"
+sce5_6s3$batch <- "6s3"
+sce5_7s4$batch <- "7s4"
+sce5_8s5$batch <- "8s5"
+sce5_9s6$batch <- "9s6"
+
+```
+
+```{r}
+uncorrmerge <- cbind(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6)
+```
+
+Note we haven't dropped the discard-flagged cells just yet:
+```{r}
+summary(uncorrmerge$discard)
+```
+
+#### PLOTS: library size, genes detected, mitochondrial gene % by discard status 
+Uncorrected merged data
+```{r}
+plotColData(uncorrmerge, x="detected", y="sum")+
+  geom_point(aes(fill=uncorrmerge$batch), shape=21, size=3, alpha=0.4)+
+ # scale_fill_manual(values=c("white", "magenta"))+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.position = "top", legend.box = "horizontal")+
+  labs(x="Genes detected per cell", y="Sum per cell", fill="Batch")
+
+#ggsave('plots_5dpf_Raj/uncorrmerge-sum-detected-discarded.png', dpi=300)
+#ggsave('plots_5dpf_Raj/uncorrmerge-sum-det-batch.png', dpi=300)
+```
+
+Looks like they detected slightly more transcripts per cell. Max of AB 6 dpf sample was ~2500 genes detected and sum per cell looked about 2-4x the number of genes detected.
+
+```{r}
+plotColData(uncorrmerge, x = "detected", y="subsets_Mito_percent")+
+  geom_jitter(aes(fill=uncorrmerge$discard), width=1, height=1, shape=21, size=3, alpha=0.4)+
+  scale_fill_manual(values=c("white", "magenta"))+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.position = "top", legend.box = "horizontal")+
+  labs(x="Genes detected per cell", y="Mitochondrial genes (%)", fill="Discarded?")
+#ggsave('plots_5dpf_Raj/genes-detec-ted-mito-pct-batch.png', dpi=300)
+#ggsave('plots_5dpf_Raj/genes-detected-mito-pct-discarded.png', dpi=300)
+```
+Can ask questions here like if a cell type that expresses a particular gene has a higher/lower discard rate than the population rate:
+Are glia more likely to be discarded (maybe having more processes makes them more vulnerable to damage during isolation)? Mauthner?
+```{r}
+mglia_subset <- uncorrmerge[,which(assay(uncorrmerge)["mpeg1.1",] > 1)] 
+mauthner_subset <- uncorrmerge[,which(assay(uncorrmerge)["nefma",] > 20)] 
+summary(mglia_subset$discard)
+summary(mauthner_subset$discard)
+summary(uncorrmerge$discard)
+```
+
+After plotting, drop the bad cells (can't go back)
+```{r}
+uncorrmerge <- uncorrmerge[,!uncorrmerge$discard]
+
+#Need to do this for the individuals too because batch-corrected merging (below)
+sce5_1s7 <- sce5_1s7[,!sce5_1s7$discard]
+sce5_2s3 <- sce5_2s3[,!sce5_2s3$discard]
+sce5_3s4 <- sce5_3s4[,!sce5_3s4$discard]
+sce5_4s1 <- sce5_4s1[,!sce5_4s1$discard]
+sce5_5s2 <- sce5_5s2[,!sce5_5s2$discard]
+sce5_6s3 <- sce5_6s3[,!sce5_6s3$discard]
+sce5_7s4 <- sce5_7s4[,!sce5_7s4$discard]
+sce5_8s5 <- sce5_8s5[,!sce5_8s5$discard]
+sce5_9s6 <- sce5_9s6[,!sce5_9s6$discard]
+
+```
+
+
+
+
+
+### 3. Feature selection (`scran` functions)
+```{r}
+dec <- modelGeneVar(uncorrmerge)
+hvg <- getTopHVGs(dec, fdr.threshold = 0.05) #prop=0.1 is top 10% of genes, or fdr.threshold=0.05, or var.threshold=0
+```
+
+
+
+
+
+Look at the highly variable genes!
+```{r}
+#decdf <- as.data.frame(dec)
+
+ggplot(decdf, aes(x=mean, y=total, label=rownames(decdf)))+
+  geom_point(shape=21)+
+  geom_text(vjust = 0, nudge_y = 0.05, aes(color = )+
+  geom_smooth(color="magenta")+
+  labs(x = "Mean log-expression", y = "Variance")+
+  theme_classic()+
+  xlim(0,4)
+#ggsave('plots_5dpf_Raj/hvgs-geom-text.png', dpi=300)
+```
+
+### 3.5. How many PCs? 
+`denoisePCA()`: percentage of variance explained by technical noise is estimated by summing the technical components across genes and dividing by the summed total variance.
+```{r}
+sced <- denoisePCA(uncorrmerge, dec, subset.row=getTopHVGs(dec, fdr.threshold = 0.05))
+npcs <- ncol(reducedDim(sced, "PCA"))
+npcs
+```
+`
+
+### 4. Dimensionality reduction - use ncomponents generated by denoisePCA() 
+```{r}
+uncorrmerge <- runPCA(uncorrmerge, ncomponents=npcs, subset_row=hvg) #ncomponents=npcs from denoisePCA()
+uncorrmerge <- runUMAP(uncorrmerge, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+
+
+
+### 5. Clustering
+
+
+```{r}
+set.seed(1357)
+g <- buildSNNGraph(uncorrmerge, use.dimred = 'PCA')
+colLabels(uncorrmerge) <- factor(igraph::cluster_louvain(g)$membership)
+```
+
+`
+
+
+```{r}
+summary(uncorrmerge$label)
+```
+ 
+gad1b similar
+```{r}
+set.seed(1357)
+plotUMAP(uncorrmerge, colour_by="label", text_by="label", point_alpha=0.4)+ #, text_colour = "red")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.position = "top", legend.box = "horizontal")
+#ggsave('plots_5dpf_Raj/umap-uncorrmerge.png', dpi=300)
+#ggsave('plots_5dpf_Raj/umap-uncorr-gad1b.png', dpi=300)
+```
+```{r}
+batchclusterdf <- as.data.frame(table(uncorrmerge$label, uncorrmerge$batch)) 
+```
+
+```{r}
+ggplot(batchclusterdf, aes(x=Var2, Freq, fill=Var1))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")+
+  scale_x_discrete(labels = c('1','2','3','4', '5', '6', '7', '8', '9'))
+#ggsave('plots_5dpf_Raj/fraction-cluster-batch-bar.png', dpi=300)
+```
+
+
+```{r}
+plotUMAP(uncorrmerge)+
+  geom_jitter(shape=21, color="white", alpha=0.4, width=0.5, height=0.5, aes(fill=uncorrmerge$batch))+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.position = "top", legend.box = "horizontal",
+        legend.title = element_blank())
+#ggsave('plots_5dpf_Raj/umap-color-batch.png', dpi=300)
+```
+### Markers for clusters / batches 1-3 different than 4-9 because of clusters 1-4
+What are these cells?
+
+```{r}
+marks5dpf_some <- findMarkers(uncorrmerge, pval.type = "some", direction="up")
+```
+
+Clustering changed slightly (?) but 1-4 appear peripheral, 16 crystallins, 15 glia
+```{r}
+somemarkers <- marks5dpf_some[["15"]]
+somemarkers[1:10,1:3]
+```
+
+
+
+
+### Glia cluster 15:
+hold off on running these chunks today 7-18 (reloading env) 
+
+still have not run any of these 7-28-21 in favor of batch-corrected glia cluster below
+```{r}
+sceastro <- uncorrmerge[,uncorrmerge$label == 15] 
+```
+
+
+```{r}
+sceastro
+```
+highly var genes for astros
+```{r}
+deca <- modelGeneVar(sceastro)
+hvga <- getTopHVGs(deca, fdr.threshold = 0.05)
+```
+
+```{r}
+
+#decadf <- as.data.frame(deca)
+
+ggplot(decadf, aes(x=mean, y=total, label=rownames(decadf)))+
+  #geom_point(shape=21)+
+  geom_text(check_overlap = TRUE)+
+  geom_smooth(color="magenta")+
+  labs(x = "Mean log-expression", y = "Variance")+
+  theme_classic()+
+  xlim(0,4)
+```
+
+
+how many astro PCs?
+```{r}
+sceda <- denoisePCA(sceastro, deca, subset.row=getTopHVGs(deca, fdr.threshold = 0.05))
+npcsa <- ncol(reducedDim(sceda, "PCA"))
+npcsa
+```
+`
+
+4. Dimensionality reduction 
+```{r}
+sceastro <- runPCA(sceastro, ncomponents=npcsa, subset_row=hvga) #ncomponents=npcs from denoisePCA()
+sceastro <- runUMAP(sceastro, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+
+
+
+
+5. Clustering
+```{r}
+set.seed(1357)
+ga <- buildSNNGraph(sceastro, use.dimred = 'PCA')
+colLabels(sceastro) <- factor(igraph::cluster_louvain(ga)$membership)
+```
+
+
+```{r}
+set.seed(1357)
+plotUMAP(sceastro, colour_by="hepacama", text_by="label", point_alpha=0.4, text_colour="red")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.position = "top", legend.box = "horizontal")
+       # legend.title = element_blank())
+#ggsave('plots_5dpf_Raj/subcluster-16-umap-slc6a1b.png', dpi=300)
+```
+
+```{r}
+table(sceastro$batch, sceastro$label)
+```
+
+
+Clearly some batch effects! Astro subpops not distributed evenly betw clusters at all!
+
+### Batch correction with batchelor
+
+
+Do separate QC, norm, clustering for each first. See first paragraph on section 13.2: https://bioconductor.org/books/release/OSCA/integrating-datasets.html#setting-up-the-data
+
+1. Common universe of genes in both sets (commented out because I did this before to construct uncorrmerge)
+```{r}
+#universe <- intersect(rownames(sce_5s6), rownames(sce_5s7))
+#length(universe)
+# already did this step above (post logNormCounts but before dec/hvgs)
+```
+Need decs/hvgs for each individual sce5_ (which I did not do for uncorrmerge: dec and hvg belong to uncorrmerge)
+```{r}
+dec1 <- modelGeneVar(sce5_1s7)
+hvg1 <- getTopHVGs(dec1, fdr.threshold = 0.05)
+
+dec2 <- modelGeneVar(sce5_2s3)
+hvg2 <- getTopHVGs(dec2, fdr.threshold = 0.05)
+
+dec3 <- modelGeneVar(sce5_3s4)
+hvg3 <- getTopHVGs(dec3, fdr.threshold = 0.05)
+
+dec4 <- modelGeneVar(sce5_4s1)
+hvg4 <- getTopHVGs(dec4, fdr.threshold = 0.05)
+
+dec5 <- modelGeneVar(sce5_5s2)
+hvg5 <- getTopHVGs(dec5, fdr.threshold = 0.05)
+
+dec6 <- modelGeneVar(sce5_6s3)
+hvg6 <- getTopHVGs(dec6, fdr.threshold = 0.05)
+
+dec7 <- modelGeneVar(sce5_7s4)
+hvg7 <- getTopHVGs(dec7, fdr.threshold = 0.05)
+
+dec8 <- modelGeneVar(sce5_8s5)
+hvg8 <- getTopHVGs(dec8, fdr.threshold = 0.05)
+
+dec9 <- modelGeneVar(sce5_9s6)
+hvg9 <- getTopHVGs(dec9, fdr.threshold = 0.05)
+```
+
+
+```{r}
+# Subset sces for merging - did this earlier
+# sce <- sce[universe,]
+
+# Also subset the variance modeling results - did NOT do this earlier - actually is this even necessary since dec/hvg computed after subsetting to universe genes? oh well do it anyway for sake of remembering next time
+
+dec1 <- dec1[universe,]
+dec2 <- dec2[universe,]
+dec3 <- dec3[universe,]
+dec4 <- dec4[universe,]
+dec5 <- dec5[universe,]
+dec6 <- dec6[universe,]
+dec7 <- dec7[universe,]
+dec8 <- dec8[universe,]
+dec9 <- dec9[universe,]
+```
+
+
+2. Now use (first install) `batchelor`. We want the function `multiBatchNorm()` to rescale each batch to adjust for differences in sequencing depth between batches - it recomputes log-normalized expression values after adjusting the size factors for systematic differences in coverage between sce objects.
+
+`BiocManager::install("batchelor")`
+
+```{r}
+
+rescaled <- multiBatchNorm(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6)
+sce5_1s7 <- rescaled[[1]]
+sce5_2s3 <- rescaled[[2]]
+sce5_3s4 <- rescaled[[3]]
+sce5_4s1 <- rescaled[[4]]
+sce5_5s2 <- rescaled[[5]]
+sce5_6s3 <- rescaled[[6]]
+sce5_7s4 <- rescaled[[7]]
+sce5_8s5 <- rescaled[[8]]
+sce5_9s6 <- rescaled[[9]]
+```
+
+
+
+
+3. Average the variance components across all batches with the combineVar() function (I think a `scran` function?) - average because responsive to batch-specific HVGs while still preserving the within-batch ranking of genes.
+
+```{r}
+combineddec <- combineVar(dec1, dec2, dec3, dec4, dec5, dec6, dec7, dec8, dec9)
+chosenhvgs <- combineddec$bio > 0
+sum(chosenhvgs)
+```
+Diagnosing batch effects
+```{r}
+# Synchronizing the metadata for cbind()ing: I did the cbind above to get uncorrmerge, here I move fwd with uncorrmerge but the newly generated chosenhvgs
+
+#rowData(sce_5s6) <- rowData(sce_5s7)
+#sce_5s6$batch <- "5s6"
+#sce_5s7$batch <- "5s7"
+#uncorrected <- cbind(sce_5s6, sce_5s7) #error because the two PCAs have diff numbers of ncomponents! Set 12 to 24 or 24 to 12?
+
+# Using RandomParam() as it is more efficient for file-backed matrices (?)
+set.seed(0010101010)
+uncorrmerge <- runPCA(uncorrmerge, subset_row=chosenhvgs,
+    BSPARAM=BiocSingular::RandomParam())
+```
+
+
+```{r}
+snngr <- buildSNNGraph(uncorrmerge, use.dimred="PCA")
+clusters <- igraph::cluster_louvain(snngr)$membership
+tab <- table(Cluster=clusters, Batch=uncorrmerge$batch)
+tabdf <- as.data.frame(tab)
+head(tabdf)
+```
+pretty sure this is a bad one - was trying something else and got confused -
+delete
+```{r}
+ggplot(tabdf, aes(x=Batch, Freq, fill=Cluster))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Proportion cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")
+```
+
+
+```{r}
+set.seed(1111001)
+uncorrmerge <- runUMAP(uncorrmerge, dimred="PCA")
+
+p1 <- plotUMAP(uncorrmerge, colour_by="batch", text_by="label")+
+    theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.position = "top", legend.box = "horizontal", legend.title=element_blank())+
+  scale_color_discrete(labels =c ("1", "2","3", "4", "5", "6","7", "8", "9"))
+
+p1
+#ggsave('plots_5dpf_Raj/batch-effect-umap.png', dpi=300, width=6)
+```
+Save workspace 7-18-2021:
+-basically everything up to the astro subcluster part, which was not run (it was based on the uncorrected merge set and I wanted to redo it on the merge corr, haven't gotten that far yet)
+```{r}
+save.image('plots_5dpf_Raj/batch-correction-2021-7-18.RData')
+```
+
+
+### Now correct for the batch effect
+```{r}
+rescaled <- rescaleBatches(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6)
+rescaled
+```
+
+```{r}
+set.seed(1010101010) 
+rescaled <- runPCA(rescaled, subset_row=chosenhvgs, 
+    exprs_values="corrected",
+    BSPARAM=BiocSingular::RandomParam())
+```
+
+```{r}
+snngr <- buildSNNGraph(rescaled, use.dimred="PCA")
+clustersresc <- igraph::cluster_louvain(snngr)$membership
+tabresc <- table(Cluster=clustersresc, Batch=rescaled$batch)
+tabresc
+```
+
+```{r}
+rescaled <- runUMAP(rescaled, dimred="PCA")
+rescaled$batch <- factor(rescaled$batch)
+
+colLabels(rescaled) <- factor(igraph::cluster_louvain(snngr)$membership) #need this for cluster numbering on umap plot below
+
+
+```
+
+
+Put the counts back on the rescaled matrix: need this for coloring umap by gene
+```{r}
+assays(rescaled) <- assays(uncorrmerge)
+rescaled
+```
+
+```{r}
+rescaled
+```
+Lil aside - Batch effect PCA!
+```{r}
+
+#plotPCA(rescaled, ncomponents = 4, colour_by = "label")
+
+plotPCA(uncorrmerge, ncomponents = 4, colour_by = "batch")
+```
+
+
+slc1a2b, cx43, hepacama, vim, 
+
+```{r}
+p2 <- plotUMAP(rescaled, colour_by="batch", text_by="label")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.position= "top") +
+  scale_color_discrete(labels =c ("1", "2","3", "4", "5", "6","7", "8", "9"))
+p2
+  #theme_void()+
+  #guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  
+#ggsave('plots_5dpf_Raj/batch-corrected-umap.png', dpi=300, width=6)
+```
+```{r}
+plotUMAP(rescaled, colour_by="label", text_by="label", point_alpha=0.4)+
+  theme_void()+
+  #guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+```
+
+
+```{r}
+mainumap <- plotUMAP(rescaled, colour_by="label", point_alpha=0.4)+
+  theme_void()+
+  #guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+glulaumap <- plotUMAP(rescaled, colour_by="glula", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+slc1a2bumap <- plotUMAP(rescaled, colour_by="slc1a2b", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+cx43umap <- plotUMAP(rescaled, colour_by="cx43", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+ptnumap <- plotUMAP(rescaled, colour_by="ptn", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+fabp7aumap <- plotUMAP(rescaled, colour_by="fabp7a", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+slc6a1bumap <- plotUMAP(rescaled, colour_by="slc6a1b", point_alpha=0.4)+
+  theme_void()+
+  guides(color=guide_colorbar(title = "", frame.colour = "black", ticks.colour = "black"))+
+  theme(legend.position = "left" )
+
+#ggsave('plots_5dpf_Raj/batch-corr-umap-glula.png', dpi=300)
+```
+
+I like this but want all on same scale. The values are pretty close and it's meant to be qualitative anyway so could potentially just omit values (like "low" to "high") - also tried patchwork to make grid because of combine but the colorbars have to exactly match and these don't.
+```{r}
+plot_grid(slc1a2bumap, glulaumap, cx43umap, ptnumap, fabp7aumap, slc6a1bumap, 
+          labels = c("slc1a2b", "glula", "cx43", "ptn", "fabp7a", "slc6a1b"),
+          label_fontface = "bold", label_size = 12)
+#ggsave('plots_5dpf_Raj/plot-grid-astro-genes.png', dpi=300, width=9)
+```
+ggcells looks useful but not currently working because of the duplicated rownames (barcodes)
+
+
+Alt idea: check out patchwork package
+
+```{r}
+ptnumap + slc1a2bumap + fabp7aumap / slc6a1bumap +
+  plot_layout(guides = 'collect')
+```
+
+
+**There are two of these bar plots:**
+
+1. Uncorrectedmerge: all the sces just c-bound together (19 clusters)
+2. This one, corrected merge (23 clusters)
+```{r}
+rescaleddf <- as.data.frame(tabresc)
+
+ggplot(rescaleddf, aes(x=Batch, Freq, fill=Cluster))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")
+
+#ggsave('plots_5dpf_Raj/rescaled-batch-cluster-bar.png', dpi=300)
+```
+### Mutual nearest neighbors
+d and k as defaults here
+return to increase k if cell types are not adequately merged
+
+
+
+```{r}
+set.seed(1000101001)
+mnnout <- fastMNN(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6, d=50, k=20, subset.row=chosenhvgs,
+    BSPARAM=BiocSingular::RandomParam(deferred=TRUE))
+mnnout
+```
+
+```{r}
+dim(reducedDim(mnnout, "corrected"))
+```
+Come back and make a bar batch/cluster plot from this after df!
+```{r}
+snngrm <- buildSNNGraph(mnnout, use.dimred="corrected")
+clustersmnn <- igraph::cluster_louvain(snngrm)$membership
+tabmnn <- table(Cluster=clustersmnn, Batch=mnnout$batch)
+tabmnn
+```
+```{r}
+#mnndf <- as.data.frame(tabmnn)
+
+ggplot(mnndf, aes(x=Batch, Freq, fill=Cluster))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="Batch id", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_classic()+
+  theme(legend.position = "top")
+
+#ggsave('plots_5dpf_Raj/mnn-batch-corr-bar-cluster.png', dpi=300)
+```
+
+
+```{r}
+colLabels(mnnout) <- factor(igraph::cluster_louvain(snngrm)$membership) #need this for cluster numbering on umap plot
+
+mnnout <- runUMAP(mnnout, dimred="corrected") #corrected here works in place of PCA
+
+mnnout$batch <- factor(mnnout$batch)
+```
+
+
+Put the original, unmodified counts/logcounts back onto mnnout for accurate plotting of counts on the batch-corrected MNN clusters
+
+mnnout contains only the highly variable genes (10480 rows); need to grab only those counts from the original uncorrmerge sce object
+```{r}
+liluniverse <- intersect(rownames(uncorrmerge), rownames(mnnout)) 
+length(liluniverse)
+```
+
+```{r}
+uncorr_for_mnn <- uncorrmerge[liluniverse,]
+assays(mnnout) <- assays(uncorr_for_mnn)
+```
+
+```{r}
+#plotUMAP(mnnout, colour_by = "label", point_alpha=0.4)
+
+p3 <- plotUMAP(mnnout, colour_by="batch", text_by="label")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.position= "top")+
+  scale_color_discrete(labels =c ("1", "2","3", "4", "5", "6","7", "8", "9"))
+
+p3
+#ggsave('plots_5dpf_Raj/mnn-batch-umap.png', width=6, dpi=300)
+```
+tried patchwork but just too inflexib;e. here i just want the 2nd, 3rd plots without the legends
+```{r}
+p2 + theme(legend.position = "none")
+#ggsave("plots_5dpf_Raj/p2_rescaled_batch.png", width=6, height=4.5, dpi=300)
+
+p3 + theme(legend.position = "none")
+#ggsave("plots_5dpf_Raj/p3_mnn_batch.png", width=6, height=4.5, dpi=300)
+```
+
+
+
+
+```{r}
+plotUMAP(mnnout, colour_by = "vim", text_by = "label", point_alpha=0.4)
+```
+Cluster 16 looks like the astro cluster in this clustering. SImilar number of cells to rescaled clustering? Yes, 506 mnn vs 562 resc.
+```{r}
+summary(mnnout$label)
+```
+cluster 16 is the mnn astro cluster I think
+but also 4, 15, 25 popping up with slc1a3b (most=15), gfap, slc6a1b, s100b, slc1a2b...
+ok 25 might be progens, 100% have fabp7a and slc1a2b
+
+58% of this glia cluster (16) expresses at least 1 slc6a1b, versus ~55% of the rescaled glia cluster
+```{r}
+a <- mnnout[,which(assay(mnnout)["slc1a2b",] >= 1)] # number is the number of gene counts/cell
+summary(a$label)/summary(mnnout$label)
+```
+
+
+
+### Subcluster on **rescaled** cluster 19 (rescaleBatches, 'rescaled' cluster 19)
+
+
+```{r}
+astrescaled <- rescaled[,rescaled$label == 19] 
+astrescaled
+```
+#### Aside (identification of cluster 19 as astro; slc expression among astro cluster)
+
+**everything after here depends on counts being added back to rescaled, which I did manually above**
+
+Find the astro cluster in the rescaled clustering by looking for clusters containing cells w astro genes
+
+gfap>3:9-1, 19-6
+slc1a2b>5: 19-1
+cx43>5: 19-7
+fabp7a>7: 10-1, 13-23, 16-1, 19-19
+glula>5: 12-1, 13-99, 19-81
+vim>3: 10-7, 12-13, 14-1, 19-10, 20-10, 23-4
+glulb
+slc1a3b>2: 6-1, 10-5, 12-2, 17-1, 18-1, 19-120, 20-1, 22-7, 23-1
+ptn>4: 19-1
+
+#### Aside-aside: Satterstrom 102 genes, intersect with universe (the sce genes)
+
+Clusters with cells at least >n genes
+
+```{r}
+satterfish <- read_csv("satterstrom_hsatodre.csv")
+head(satterfish)
+
+my_vec2 <- satterfish$gene
+my_vec2 <- as.vector(my_vec2)
+
+realvec <- intersect(my_vec2, universe)
+length(realvec)
+#realvec
+```
+
+make a df where each column is a gene from realvec, the loop here is how to add a col for each loop run
+```{r}
+
+satters_by_cluster <- data.frame(cluster=1:23)
+
+for(i in realvec) {                                   
+  a <- rescaled[,which(assay(rescaled)[i,] >= 1)] # number is the number of gene counts/cell
+  new <- summary(a$label)
+  satters_by_cluster[ , ncol(satters_by_cluster) + 1] <- new                  #append - this works
+  colnames(satters_by_cluster)[ncol(satters_by_cluster)] <- paste0(i)  #colnames are genes
+}
+```
+
+
+
+so right now the "value" in satter by cluster is the number of cells per cluster that have at least # counts (variable set in the loop). would be really cool if could get fraction of cluster expressing (divide by dim(cluster))
+
+here we get a vector containing the total number of cells per cluster
+```{r}
+
+cluster_n_cells <- rep(0,23)
+
+for(i in 1:23){
+  a <- rescaled[,rescaled$label == i] 
+  cluster_n_cells[i] <- dim(a)[2]
+}
+
+cluster_n_cells
+
+```
+
+```{r}
+satters_by_cluster$ncells <- cluster_n_cells
+head(satters_by_cluster)
+```
+
+
+
+make it long
+add fraction cluster expressing
+```{r}
+long_satters_by_cluster <- satters_by_cluster %>% gather(gene, value, -cluster, -ncells)
+long_satters_by_cluster <- long_satters_by_cluster %>% mutate(fraction_cluster_exping = value/ncells)
+```
+
+
+```{r}
+long_satters_by_cluster %>% filter(gene == "slc6a1b")
+```
+
+remove boring genes to make plot better looking
+```{r}
+smaller_realvec <- long_satters_by_cluster %>% group_by(gene) %>% filter(min(value) > 1) %>% summarize()
+```
+
+PLOT
+```{r}
+plotDots(rescaled, smaller_realvec$gene, exprs_values = "logcounts", detection_limit =0, group = "label")+
+  labs(x="Cluster", y="", color="Mean log2counts per cluster", size="Fraction of cluster expressing")+
+  theme(legend.position = "top", legend.justification = "center" , axis.text.x = element_text(angle=45, hjust=1 ))+
+ guides(size=guide_legend(title.position = "top"), color=guide_colorbar(title.position = "top"))+
+  coord_flip()
+#ggsave('plots_5dpf_Raj/dotplot-rescaled-cluster-satter.png', dpi=300)
+```
+
+
+Little aside: can we iterate through all of the "at least n many detected" copies of slc6a1b and find the avg # copies detected
+This didn't really go anywhere but basically wanted to know, of the 562 cells in cluster 19, how many had 1 of slc6a1b, how many had 2, 3, 4,...,22 etc (goes up to like 81 I think?)
+```{r}
+cells_with_n_slcs <- rep(0,100)
+
+for(i in 0:100) {                                   
+  a <- astrescaled[,which(assay(astrescaled)["slc6a1b",] > i)] # i is number of gene counts/cell
+  cells_with_n_slcs[i] <- dim(a)[2] #had also tied dividing by 562 to do a fraction
+}
+```
+
+```{r}
+dim(astrescaled[,which(assay(astrescaled)["slc6a1b",] == 0)])[2] #sometimes this fs up. should not give 562, like 200ish
+```
+
+
+```{r}
+plot(cells_with_n_slcs)
+```
+
+
+
+
+
+```{r}
+ggplot(long_satters_by_cluster, aes(x=cluster, y=fraction_cluster_exping, fill=gene))+
+  geom_bar(stat="identity", position="dodge")+
+  theme_classic()+
+  theme(legend.position="none")+
+  labs(x="Cluster", y="Proportion of cluster cells expressing Satterstrom-102")
+```
+Notice this plot (which I made before the dotplot (plotDots) above, is basically just a slice of the dotplot for slc6a1b, except fraction_cluster_exping ignores counts and is just whatever the filter in the loop above was (here I think 1))
+```{r}
+long_satters_by_cluster %>%
+  filter(cluster == 19) %>%
+  filter(fraction_cluster_exping > 0.05) %>%
+  ggplot(aes(x=gene, y=fraction_cluster_exping))+
+    geom_bar(stat="identity")+
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  labs(x="", y="Proportion of cluster expressing")
+```
+
+
+
+```{r}
+ggplot(long_satters_by_cluster, aes(x=cluster, y=value, fill=gene))+
+  geom_bar(stat="identity")+
+  theme_classic()+
+  theme(legend.position = "none")
+```
+
+
+```{r}
+long_satters_by_cluster %>% group_by(gene) %>% summarize(cluster_with_most_cells_exping = which.max(value)) 
+```
+
+#### Cluster 19 check
+
+Got worried about 2/3 of GFAP+ cells being outside of cluster 19.
+
+How good is cluster 19 for astros? Check number cells carrying some key transcripts in the astrescaled (cluster 19) and rescaled sces:
+
+-cluster 19 cells w/ slc1a2b slc1a3b cx43 slc6a1b = 207
+-whole set (rescaled) w/ same four = 228
+207/228 pretty good!
+
+how many of the cluster 19 cells w/ slc1a2b slc1a3b and cx43 *don't* express slc6a1b? = 89 
+```{r}
+n_astro_cells_astrescaled <- dim(astrescaled[,which((assay(astrescaled)["slc1a2b",] >= 1) & (assay(astrescaled)["slc1a3b",] >= 1) & (assay(astrescaled)["cx43",] >= 1) & (assay(astrescaled)["slc6a1b",] >= 1))])[2]
+
+n_astro_cells_rescaled <- dim(rescaled[,which((assay(rescaled)["slc1a2b",] >= 1) & (assay(rescaled)["slc1a3b",] >= 1) & (assay(rescaled)["cx43",] >= 1) & (assay(rescaled)["slc6a1b",] >= 1))])[2]
+```
+
+```{r}
+n_ast_cells_astresc_non6a1b <- dim(astrescaled[,which((assay(astrescaled)["slc1a2b",] >= 1) & (assay(astrescaled)["slc1a3b",] >= 1) & (assay(astrescaled)["cx43",] >= 1) & (assay(astrescaled)["slc6a1b",] < 1) )])[2]
+```
+
+296 cells, of which 89 don't express any slc6a1b and 207 do.
+
+Play chunk for checking other combos, slc1a3b and gfap = 74
+```{r}
+dim(rescaled[,which( (assay(rescaled)["slc1a3b",] >= 1) & (assay(rescaled)["slc6a1b",] >= 1) & (assay(rescaled)["gsx1",] >= 1))])[2]
+
+dim(rescaled[,which(assay(rescaled)["gsx1",] >= 1)])[2]
+```
+
+more combos (this used to be earlier - this was where I started playing with this)
+```{r}
+ncells_6a1b_and_1a2b <- dim(astrescaled[,which((assay(astrescaled)["slc6a1b",] >= 1) & (assay(astrescaled)["slc1a2b",] >= 1))])[2]
+ncells_6a1b <- dim(astrescaled[,which(assay(astrescaled)["slc6a1b",] >= 1)])[2]
+ncells_1a2b <- dim(astrescaled[,which(assay(astrescaled)["slc1a2b",] >= 1)])[2]
+ncells_6a1b_or_1a2b <- dim(astrescaled[,which((assay(astrescaled)["slc6a1b",] >= 1) | (assay(astrescaled)["slc1a2b",] >= 1))])[2]
+ncells_reast_subc <- dim(astrescaled)[2]
+
+dim(astrescaled[,which((assay(astrescaled)["slc1a2b",] >= 1) & (assay(astrescaled)["slc6a1b",] =0))])[2]
+
+#p(a u b) = pa + pb - p a int b  so then 463 = 445 + 314 - 296
+#p a int b = pa * pb if indep
+```
+
+```{r}
+ncells_6a1b_or_1a2b - ncells_6a1b
+```
+
+```{r}
+ncells_6a1b_or_1a3b <- dim(astrescaled[,which((assay(astrescaled)["slc6a1b",] >= 1) | (assay(astrescaled)["slc1a3b",] >= 1))])[2]
+ncells_1a3b <- dim(astrescaled[,which(assay(astrescaled)["slc1a3b",] >= 1)])[2]
+
+```
+292 6a1b OR 1a3b cells
+292 1a3b cells
+236 6a1b cells
+
+why is 'and' inconsistently working?
+```{r}
+dim(astrescaled[,which(assay(astrescaled)["elavl3",] >= 1)])
+```
+
+#### Back to astro subclustering (rescaled cluster 19)
+
+highly var genes for astros
+```{r}
+decar <- modelGeneVar(astrescaled)
+hvgar <- getTopHVGs(decar, fdr.threshold = 0.05)
+```
+
+
+```{r}
+decardf <- as.data.frame(decar)
+
+ggplot(decardf, aes(x=mean, y=total, label=rownames(decardf)))+
+  #geom_point(shape=21)+
+  geom_text(check_overlap = TRUE)+
+  geom_smooth(color="magenta")+
+  labs(x = "Mean log-expression", y = "Variance")+
+  theme_classic()+
+  xlim(0,4)
+```
+
+
+how many astro PCs?
+```{r}
+scedar <- denoisePCA(astrescaled, decar, subset.row=getTopHVGs(decar, fdr.threshold = 0.05))
+ncol(reducedDim(scedar, "PCA"))
+
+```
+`
+
+Astro dim red 
+```{r}
+astrescaled <- runPCA(astrescaled, ncomponents=10, subset_row=hvgar) #ncomponents=npcs from denoisePCA()
+astrescaled <- runUMAP(astrescaled, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+
+
+Astro subcluster-clustering
+```{r}
+set.seed(1357)
+gar <- buildSNNGraph(astrescaled, use.dimred = 'PCA')
+colLabels(astrescaled) <- factor(igraph::cluster_louvain(gar)$membership)
+```
+
+mdka - 3/10
+ptn
+fabp7a - everywhere
+slc6a1b
+gfap
+gsx1
+slc1a3b all over
+vim
+slc1a2b
+elavl3 v faint
+
+ctnnb1 ! 3/10
+eif3g
+irf2bpl
+ap2s1
+```{r}
+set.seed(1357)
+plotUMAP(astrescaled, colour_by="gfap", text_by="label", point_alpha=0.4) + #, text_colour="red")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.position = "top", legend.box = "horizontal")
+       # legend.title = element_blank())
+#ggsave('plots_5dpf_Raj/subcluster-19-umap-mdka.png', dpi=300)
+```
+```{r}
+plotPCA(astrescaled, ncomponents = 3, colour_by = "label")
+```
+Batch effects in the astro subcluster (19)?
+```{r}
+asttable <- table(Cluster=astrescaled$label, Batch=astrescaled$batch)
+asttable
+```
+chisq test 13.6.1 Mixing between batches
+```{r}
+chisq.test(asttable)
+```
+
+### MNN astro subcluster
+Looks like cluster 16: See end of section on MNN clustering
+
+
+```{r}
+mnnastro <- mnnout[,mnnout$label == 16]
+```
+
+
+#### Satterstrom genes 
+
+```{r}
+mnnSattervec <- intersect(my_vec2, liluniverse)
+length(mnnSattervec)
+```
+Make a df where each column is a gene from mnnSattervec, the loop here adds a column for each gene
+```{r}
+
+satters_by_cluster_mnn <- data.frame(cluster=1:28)
+
+for(i in mnnSattervec) {                                   
+  a <- mnnout[,which(assay(mnnout)[i,] >= 1)] # number is the number of gene counts/cell
+  new <- summary(a$label)
+  satters_by_cluster_mnn[ , ncol(satters_by_cluster_mnn) + 1] <- new            #appends
+  colnames(satters_by_cluster_mnn)[ncol(satters_by_cluster_mnn)] <- paste0(i)  #colnames are genes
+}
+```
+
+
+```{r}
+satters_by_cluster_mnn
+```
+
+the "value" in satter by cluster is the number of cells per cluster that have at least # counts (hard coded # set in the loop). would be really cool if could get fraction of cluster expressing (divide by dim(cluster))
+
+here we get a vector containing the total number of cells per cluster to do that:
+```{r}
+
+cluster_n_cells_mnn <- rep(0,28)
+
+for(i in 1:28){
+  a <- mnnout[,mnnout$label == i] 
+  cluster_n_cells_mnn[i] <- dim(a)[2]
+}
+
+cluster_n_cells_mnn
+
+```
+
+```{r}
+satters_by_cluster_mnn$ncells <- cluster_n_cells_mnn
+head(satters_by_cluster_mnn)
+```
+
+make it long and add fraction cluster expressing (**need ncells per cluster**)
+```{r}
+long_satters_by_cluster_mnn <- satters_by_cluster_mnn %>% gather(gene, value, -cluster, -ncells)
+long_satters_by_cluster_mnn <- long_satters_by_cluster_mnn %>% mutate(fraction_cluster_exping = value/ncells)
+```
+
+
+```{r}
+long_satters_by_cluster_mnn %>% filter(gene == "slc6a1b")
+```
+
+remove boring genes to make plot better looking
+```{r}
+smallermnnvec <- long_satters_by_cluster_mnn %>% group_by(gene) %>% filter(min(value) >= 1) %>% summarize()
+```
+
+PLOT
+```{r}
+plotDots(mnnout, smallermnnvec$gene, exprs_values = "logcounts", detection_limit =0, group = "label")+
+  labs(x="Cluster", y="", color="Mean log2counts per cluster", size="Fraction of cluster expressing")+
+  theme(legend.position = "top", legend.justification = "center" , axis.text.x = element_text(angle=45, hjust=1 ))+
+ guides(size=guide_legend(title.position = "top"), color=guide_colorbar(title.position = "top"))+
+  coord_flip()
+#ggsave('plots_5dpf_Raj/dotplot-rescaled-cluster-satter.png', dpi=300)
+```
+#### Subclustering
+
+highly var genes for cluster 16
+```{r}
+dec_ast_mnn <- modelGeneVar(mnnastro)
+hvg_ast_mnn <- getTopHVGs(dec_ast_mnn, fdr.threshold = 0.05)
+```
+
+
+```{r}
+dec_ast_mnn_df <- as.data.frame(dec_ast_mnn)
+
+ggplot(dec_ast_mnn_df, aes(x=mean, y=total, label=rownames(decardf)))+
+  #geom_point(shape=21)+
+  geom_text(check_overlap = TRUE)+
+  geom_smooth(color="magenta")+
+  labs(x = "Mean log-expression", y = "Variance")+
+  theme_classic()+
+  xlim(0,4)
+```
+
+
+how many astro PCs?
+```{r}
+scedar <- denoisePCA(astrescaled, decar, subset.row=getTopHVGs(decar, fdr.threshold = 0.05))
+ncol(reducedDim(scedar, "PCA"))
+
+```
+`
+
+Astro dim red 
+```{r}
+astrescaled <- runPCA(astrescaled, ncomponents=10, subset_row=hvgar) #ncomponents=npcs from denoisePCA()
+astrescaled <- runUMAP(astrescaled, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+
+
+Astro subcluster-clustering
+```{r}
+set.seed(1357)
+gar <- buildSNNGraph(astrescaled, use.dimred = 'PCA')
+colLabels(astrescaled) <- factor(igraph::cluster_louvain(gar)$membership)
+```
+
+
+```{r}
+save.image('plots_5dpf_Raj/slc6a1b-plots-clusterfraction-2021-8-11.RData')
+```
+
+
+

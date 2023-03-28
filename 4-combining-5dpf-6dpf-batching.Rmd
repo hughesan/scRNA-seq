@@ -1,0 +1,707 @@
+---
+title: "Combining 5 dpf and 6 dpf data & batch exploration"
+author: "Alexandria Hughes"
+date: "8/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### What's in here
+
+  + Bring in R objects for the 5 dpf sces (9 of them; GEO accession GSE158142) 
+  + MNN batch correction on 5's + 6 dpf (6 dpf treated as one batch)
+  + Pulled 6 dpf back out post-MNN and examined how combining with batch-labeled 5 dpf data changed the 6 dpf clustering compared to "uninformed" 6 dpf clustering alone
+  + Evaluated association between "informed" (clustering w/ 5dpf MNN then retrieve 6dpf data)  vs "uninformed" (6dpf data alone w/o batch-corr) clusters via Rand index and Thiel's uncertainty coefficient
+  + Also looked at fluorophore cluster membership in the 6 dpf data
+
+### Libraries + workspace with 5dpf objects
+
+```{r, message=FALSE}
+library(tidyverse)
+library(Matrix)
+library(tidymodels) #includes corrr
+library(DescTools) #uncertainty coeff
+
+library(SingleCellExperiment)
+library(BiocSingular)
+library(batchelor)
+library(scater)
+library(scran)
+library(uwot)
+
+library(viridis)
+library(cowplot)
+library(patchwork)
+```
+
+Load a workspace I previously created containing 5dpf data from GEO (accession GSE158142; 9 5dpf datasets, each as sce objects):
+```{r}
+load('4_output_5dpf_6dpf/workspace-2021-8-13.RData')
+```
+
+### Get 6 dpf data up to speed
+
+Here the data are one merged superbatch (no batch labeling)
+```{r}
+matrix_dir = "dir/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv")
+features.path <- paste0(matrix_dir, "genes.tsv")
+matrix.path <- paste0(matrix_dir, "matrix.mtx")
+
+mat <- readMM(file = matrix.path) 
+
+feature.names = read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names = read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+colnames(mat) <- barcode.names$V1
+
+rownames(mat) <- feature.names$V2
+```
+
+
+Make sce object, remove matrix for space
+```{r}
+sce6dpf <- SingleCellExperiment(assays = list(counts = mat))
+
+sce6dpf_orig <- SingleCellExperiment(assays = list(counts = mat)) #keeping for later; we'll work with sce6dpf
+
+rm(mat)
+
+```
+
+
+#### 1. Quality control
+
+```{r}
+is.mito <- grepl("^mt-", rownames(sce6dpf)) #begins with mt = mitochondrial genes
+qcstats <- perCellQCMetrics(sce6dpf, subsets=list(Mito=is.mito))
+filtered <- quickPerCellQC(qcstats, percent_subsets="subsets_Mito_percent")
+sce6dpf$discard <- filtered$discard
+
+#Now drop the discards - comment this line out to keep them (like to plot flagged cells)
+sce6dpf <- sce6dpf[, !filtered$discard]
+```
+
+```{r}
+sce6dpf <- addPerCellQC(sce6dpf, subsets=list(Mito=grep("mt-", rownames(sce6dpf))))
+```
+
+
+#### 2. Normalization
+
+```{r}
+sce6dpf <- logNormCounts(sce6dpf)
+```
+
+
+#### 3. Feature selection (`scran`)
+
+note: dec and hvg correspond to uncorrmerge (processed as merge)
+dec1, hvg1 belong to sce5_1s7 and etc suffix numbering
+so these get _6dpf numbering
+
+```{r}
+dec_6dpf <- modelGeneVar(sce6dpf)
+hvg_6dpf <- getTopHVGs(dec_6dpf, fdr.threshold = 0.05) 
+```
+
+#### 4. Dim reduction
+
+Use denoisePCA first to find number of PCs
+```{r}
+sced <- denoisePCA(sce6dpf, dec_6dpf, subset.row=getTopHVGs(dec_6dpf, fdr.threshold = 0.05))
+ncol(reducedDim(sced, "PCA"))
+rm(sced)
+```
+
+```{r}
+sce6dpf <- runPCA(sce6dpf, ncomponents=14, subset_row=hvg_6dpf) #ncomponents from above
+sce6dpf <- runUMAP(sce6dpf, dimred = 'PCA', external_neighbors=TRUE)
+```
+
+#### 5. Clustering
+
+Use igraph for clustering after building a graph with scran::buildSNNGraph. Try some alternatives, coupled with next viz step, to see how clustering changes things. cluster_walktrap generates probably too many clusters (~100). More info [here](https://igraph.org/r/doc/cluster_louvain.html). 
+
+```{r}
+set.seed(1357)
+g6dpf <- buildSNNGraph(sce6dpf, use.dimred = 'PCA')
+colLabels(sce6dpf) <- factor(igraph::cluster_louvain(g6dpf)$membership)
+```
+
+#### 6. Visualization
+
+"Label" is the assigned cluster. I love this matrix plot of the first few PCs:
+```{r}
+plotPCA(sce6dpf, ncomponents=4, colour_by = "label")
+```
+
+UMAP plot colored by cluster:
+```{r}
+plotUMAP(sce6dpf, colour_by = "label", text_by = "label")+
+  theme(text = element_text(size=14),
+        axis.text = element_text(size=14),
+        legend.text = element_text(size=12),
+        legend.position = "top", legend.box = "horizontal")
+```
+
+### Merge existing 5 dpf merges with sce6dpf
+
+from 5 dpf:
+
+  + uncorrmerge: cbind sce5 series
+  + rescaled: rescaleBatches linear regression batch correction of the sce5 series
+  + mnnout: MNN batch corr of the sce5 series
+
+our goal is to:
+
+  + find common uni of genes betw 5 dpf and 6 dpf
+      - probably only worth pursuing comparison with rescaled or mnnout (uncorrmerge is basically garbage)
+  + subset rescaled/mnnout on common universe, then also subset 6 dpf on same
+  + label each, like `sce6dpf$exp <- "6dpf"` and `rescaled$exp <- "5dpf"`
+  + cbind them (in this way it's like an uncorrected merge)
+  + BiocSingular::RandomParam and clustering
+  + plot and colour by exp
+
+
+#### Subset each of the 5dpf and 6dpf sce objects to include the same genes
+
+```{r}
+uni_56 <- intersect(rownames(sce5_1s7), rownames(sce6dpf))
+
+
+sce5_1s7 <- sce5_1s7[uni_56,]
+sce5_2s3 <- sce5_2s3[uni_56,]
+sce5_3s4 <- sce5_3s4[uni_56,]
+sce5_4s1 <- sce5_4s1[uni_56,]
+sce5_5s2 <- sce5_5s2[uni_56,]
+sce5_6s3 <- sce5_6s3[uni_56,]
+sce5_7s4 <- sce5_7s4[uni_56,]
+sce5_8s5 <- sce5_8s5[uni_56,]
+sce5_9s6 <- sce5_9s6[uni_56,]
+
+sce6dpf <- sce6dpf[uni_56,]
+```
+
+I previously annotated the 5dpf sces with batch identifiers but 6dpf doesn't have one yet. $batch stored in colData.
+```{r}
+sce6dpf$batch <- "6 dpf"
+```
+
+
+
+#### Subset highly variable genes based on inclusion in shared universe
+
+Again these lists were previously generated and now are subsetted to only include the shared universe of genes
+
+```{r}
+dec1 <- dec1[uni_56,]
+dec2 <- dec2[uni_56,]
+dec3 <- dec3[uni_56,]
+dec4 <- dec4[uni_56,]
+dec5 <- dec5[uni_56,]
+dec6 <- dec6[uni_56,]
+dec7 <- dec7[uni_56,]
+dec8 <- dec8[uni_56,]
+dec9 <- dec9[uni_56,]
+
+dec_6dpf <- dec_6dpf[uni_56,]
+```
+
+
+Average the variance components across all batches with the combineVar() function (I think a `scran` function?) - average because responsive to batch-specific HVGs while still preserving the within-batch ranking of genes.
+
+```{r}
+combineddecs <- combineVar(dec1, dec2, dec3, dec4, dec5, dec6, dec7, dec8, dec9, dec_6dpf)
+chosenhvgs <- combineddecs$bio > 0
+sum(chosenhvgs)
+```
+
+
+#### Mutual nearest neighbors integration of 5- and 6 dpf data
+
+Uses chosenhvgs (defined in above chunk) as the highly variable genes for MNN
+
+```{r}
+set.seed(1000101001)
+mnn56 <- fastMNN(sce5_1s7, sce5_2s3, sce5_3s4, sce5_4s1, sce5_5s2, sce5_6s3, sce5_7s4, sce5_8s5, sce5_9s6, sce6dpf, d=50, k=20, subset.row=chosenhvgs,
+    BSPARAM=BiocSingular::RandomParam(deferred=TRUE)) #faster PCA for file-backed matrices
+mnn56
+```
+
+Notice dimensions of the MNN object include our highly variable genes (9740) as rows x 55k cells as columns.
+
+```{r}
+snngr56 <- buildSNNGraph(mnn56, use.dimred="corrected") #notice corrected is dimred vs PCA above
+clustersmnn56 <- igraph::cluster_louvain(snngr56)$membership
+
+#contingency table to see how each batch (1-9 are 5 dpf, 10 is the 6dpf superbatch) breaks into clusters
+tab56 <- table(Cluster=clustersmnn56, Batch=mnn56$batch)
+tab56
+```
+
+Batches 1-3 are really odd: Enriched for pharyngeal arch genes and collagens and etc things that suggested bad dissection contamination. Consider dropping those batches?
+
+```{r}
+prop.table(tab56[,4:10])
+```
+
+
+Thiel's uncertainty coefficient. Do batch categories in #9 (this is a 5 dpf dataset) predict categorization in #10 (the 6 dpf WBIS data)? About 40% of assignment can be predicted.
+
+```{r}
+DescTools::UncertCoef(prop.table(tab56[,9:10]), direction = "column")
+```
+
+dataframe copy for plotting
+```{r}
+df56 <- as.data.frame(tab56)
+```
+
+
+```{r}
+ggplot(df56, aes(x=Batch, Freq, fill=Cluster))+
+  geom_bar(stat="identity", position="fill")+
+  labs(x="", y="Fraction cells assigned to cluster", fill="Cluster")+
+  theme_bw()+
+  theme(text = element_text(size=12),
+        axis.text = element_text(size=12),
+        legend.position = "top",
+        legend.box.background = element_rect(size=1))+
+   guides(fill = guide_legend(nrow = 3))+
+  scale_x_discrete(labels=c("5dpf-1", "5dpf-2","5dpf-3", "5dpf-4", "5dpf-5", "5dpf-6","5dpf-7", "5dpf-8", "5dpf-9", "6dpf"))+
+  scale_fill_viridis_d()
+#ggsave('4_output_5dpf_6dpf/mnn56-bar-batch.png', dpi=300)
+```
+
+
+
+```{r}
+colLabels(mnn56) <- factor(igraph::cluster_louvain(snngr56)$membership) #need this for cluster numbering on umap plot
+
+mnn56 <- runUMAP(mnn56, dimred="corrected") #corrected here in place of PCA
+
+mnn56$batch <- factor(mnn56$batch)
+```
+
+```{r}
+plotUMAP(mnn56, colour_by = "batch", text_by = "label", point_alpha = 0.6)+
+  theme_bw()+
+  theme(text = element_text(size=12),
+        axis.text = element_text(size=12),
+       # legend.title = element_blank(),
+        legend.position= "top",
+        legend.box.background = element_rect(size=1))+
+ scale_color_discrete(labels =c("5dpf-1", "5dpf-2","5dpf-3", "5dpf-4", "5", "6","7", "8", "9", "6 dpf"))+
+scale_color_manual(values =c("#39568c", "#39568c","#39568c", "#39568c", "#39568c", "#39568c","#39568c", "#39568c", "#39568c", "#55c667"), labels =c("5dpf-1", "5dpf-2","5dpf-3", "5dpf-4", "5dpf-5", "5dpf-6","5dpf-7", "5dpf-8", "5dpf-9", "6dpf"))+
+  labs(color = "Batch")
+#ggsave('4_output_5dpf_6dpf/umap-mnn56-batch.png', dpi=300)
+
+```
+
+#### Add the original counts back in:
+a little complicated. access each counts matrix (sparse big) using assay(sce), cbind them, subset to only take the mnn genes, then add as an assay and lognormcounts the counts
+
+```{r}
+testassay <- cbind(assay(sce5_1s7), assay(sce5_2s3), assay(sce5_3s4), assay(sce5_4s1), assay(sce5_5s2), assay(sce5_6s3), assay(sce5_7s4), assay(sce5_8s5), assay(sce5_9s6), assay(sce6dpf))
+```
+
+oops just need the relevant genes
+```{r}
+univ_mnn <- intersect(rownames(mnn56), rownames(sce5_1s7))
+testassay <- testassay[univ_mnn,]
+```
+
+```{r}
+assay(mnn56, "counts-manual") <- testassay
+```
+
+```{r}
+mnn56 <- logNormCounts(mnn56, assay.type = "counts-manual")
+```
+
+```{r}
+mnn56
+```
+```{r}
+plotUMAP(mnn56, colour_by = "slc1a2b", text_by = "label", point_alpha=0.4)
+```
+
+### Pull sce6 out after using the 5 dpf data to cluster
+
+
+```{r}
+sce6_postmnn <- mnn56[,mnn56$batch == 10]
+```
+
+#### Aside: GFP
+
+Created an extra copy of the 6dpf data at the beginning, remember? Use it now to access cells containing GFP, other fluor transcripts, despite having dropped nonoverlapping gene names for the MNN integration.
+```{r}
+sce6dpf_orig
+```
+
+Few cells express any GFP, DsRed, or Gal4
+```{r}
+sce6dpf_orig[,which(assay(sce6dpf_orig)["GFP",] >= 10)] #try DsRed, Gal4, and try diff numbers 1-10
+```
+
+Subsets of the original 6 dpf data to grab columns/cells expressing each fp gene
+```{r}
+orig_GFP <- sce6dpf_orig[,which(assay(sce6dpf_orig)["GFP",] >= 10)]
+
+orig_Gal4 <- sce6dpf_orig[,which(assay(sce6dpf_orig)["Gal4", ] >= 1)]
+
+orig_DsRed <- sce6dpf_orig[,which(assay(sce6dpf_orig)["DsRed", ] >= 5)]
+
+                    
+```
+
+column names (cell ids) that express each fp gene, intersect with postmnn sce to eliminate dead/filtered out cells
+```{r}
+GFP_col_inds <- intersect(colnames(orig_GFP), colnames(sce6_postmnn)) #cells with >10 GFP
+
+DsRed_cols <- intersect(colnames(orig_DsRed), colnames(sce6_postmnn)) 
+  
+Gal4_cols <- intersect(colnames(orig_Gal4), colnames(sce6_postmnn)) 
+
+# 'cell-number-2' %in% GFP_col_inds #returns logical really useful
+
+
+# Goal: create new column in sce6_postmnn that is GFP T/F. If colname is in GFP_col_inds then T
+```
+
+Assign each column/cell to the fp(s) that it expresses. Go through colnames(cells) and if colname is in our marked GFP, DsRed, or Gal4 (or any combination) then label the cell accordingly
+```{r}
+y <- colnames(sce6_postmnn)
+
+fp_status <- dplyr::case_when(
+  y %in% GFP_col_inds ~ "GFP+",
+  y %in% DsRed_cols ~ "DsRed+",
+  y %in% Gal4_cols ~ "Gal4+",
+  (y %in% GFP_col_inds) & (y %in% DsRed_cols) ~ "GFP+ DsRed+",
+  (y %in% GFP_col_inds) & (y %in% Gal4_cols) ~ "GFP+ Gal4+",
+  (y %in% DsRed_cols) & (y %in% Gal4_cols) ~ "DsRed+ Gal4+",
+  (y %in% DsRed_cols) & (y %in% Gal4_cols) & (y %in% GFP_col_inds) ~ "GFP+ DsRed+ Gal4+",
+  TRUE ~ "GFP- DsRed- Gal4-")
+```
+
+Seem reasonable? Yes
+```{r}
+table(fp_status)
+```
+
+Test case: label GFP+ cells T/F
+```{r}
+
+x <- colnames(sce6_postmnn)
+GFP_status <- ifelse(x %in% GFP_col_inds, TRUE, FALSE)
+
+head(GFP_status)
+```
+
+
+```{r}
+sce6_postmnn$GFP <- GFP_status
+
+sce6_postmnn$fp <- fp_status
+sce6_postmnn
+```
+```{r}
+sce6_postmnn$fp <- sce6_postmnn$fp %>% fct_relevel("GFP+", "DsRed+", "Gal4+", "GFP- DsRed- Gal4-")
+```
+
+```{r}
+plotUMAP(sce6_postmnn, jitter_type = "swarm")+
+  geom_point(aes(size = sce6_postmnn$fp, fill = sce6_postmnn$fp, color = sce6_postmnn$fp, alpha = sce6_postmnn$fp), alpha=1)+
+  scale_size_manual(values = c(2,2,2,0.5))+
+  theme_bw()+
+  theme(text = element_text(size=12),
+        axis.text = element_text(size=12),
+       legend.title = element_blank(),
+        legend.position= "top",
+        legend.box.background = element_rect(size=1))+
+scale_color_manual(values =c("#55c667", "#39568c", "#fde725", "transparent"))+
+  scale_fill_manual(values =c("#55c667", "#39568c", "#dce319", "transparent"))
+ggsave('4_output_5dpf_6dpf/fp-umap.png', dpi=300)
+```
+
+
+
+```{r}
+plotUMAP(sce6_postmnn, text_by = "label", colour_by = "fp", point_alpha=0.2)+
+ # geom_point(shape=21, color = "white", size=3, alpha=0.4)+
+  scale_color_manual(values = c("cyan", "magenta", "orange", "light grey"))+
+  scale_alpha_manual(values = c(1,1,1,0.1))
+```
+
+
+```{r}
+ plotUMAP(sce6_postmnn, text_by = "label", jitter_type = "jitter")+
+   geom_point(aes(size = sce6_postmnn$GFP, fill = sce6_postmnn$GFP, color = sce6_postmnn$GFP, alpha = sce6_postmnn$GFP), alpha=0.5)+
+   scale_size_manual(values = c(0.5,2))+
+   scale_color_manual(values = c("transparent", "magenta"))+
+  scale_alpha_manual(values = c(0.01,1))
+```
+
+##### Tabulate by fp
+
+```{r}
+fps_cluster <- as.data.frame(table(sce6_postmnn$fp, sce6_postmnn$label))
+```
+
+```{r}
+#View(fps_cluster)
+```
+
+```{r}
+fps_cluster<- fps_cluster[!is.na(fps_cluster$Var2), ]
+```
+
+
+Importantly clustering here was done **without** any of these fluorescent proteins (sce6_postmnn comes from sce6dpf intersect the 5 dpf genes (so fps lost), then MNN clustering altogether 5+6 (55k cells), then pull out the 6dpf cells again, then separately identify which cells had fps
+```{r}
+ggplot(fps_cluster %>% group_by(Var2) %>% filter(mean(Freq) >0), aes(x=Var2, y=Freq, fill=Var1))+
+  geom_bar(stat = "identity", position = "fill")+
+  theme_bw()+
+  scale_fill_viridis_d(begin=0.2, end=0.95)+
+  theme_bw()+
+  theme(text = element_text(size=12),
+        axis.text = element_text(size=12),
+        legend.position = "top",
+        legend.title = element_blank(),
+        legend.box.background = element_rect(size=1))+
+  labs(x="Cluster", y="Fraction of cells expressing")
+#ggsave('4_output_5dpf_6dpf/fp-bar-cluster.png', dpi=300)
+```
+
+##### Tab on uncorr'd for comparison
+
+```{r}
+sce6dpf$fp <- fp_status
+```
+
+
+```{r}
+plotUMAP(sce6dpf, text_by = "label", colour_by = "fp")
+```
+```{r}
+fps_clusterold <- as.data.frame(table(sce6dpf$fp, sce6dpf$label))
+```
+
+```{r}
+ggplot(fps_clusterold, aes(x=Var2, y=Freq, fill=Var1))+
+  geom_bar(stat="identity", position="fill")
+```
+
+
+#### End aside return to post-mnn
+
+```{r}
+sce6_postmnn
+```
+Patchwork plots
+```{r}
+(plotUMAP(sce6_postmnn, colour_by = "label", text_by = "label") + plotUMAP(mnn56, colour_by = "label")) / ( plotUMAP(sce6dpf, colour_by = "label") + plotUMAP(mnnout, colour_by = "label"))
+```
+Put new cluster labels on the original 6dpf data, and old cluster labels on the post-MNN data:
+```{r}
+sce6dpf$labelmnn <- sce6_postmnn$label
+```
+
+```{r}
+sce6_postmnn$labelold <- sce6dpf$label
+```
+
+Colors = original clusters
+Text = New clusters
+
+Notice how some old clusters don't have a label post batch correction (blue cluster 1, peach cluster 4 disappear)
+Can we make a mapping from old to new? For example glia cluster 5 is clearly postMNN cluster 21
+```{r}
+plotUMAP(sce6dpf, colour_by = "label", text_by = "labelmnn")+
+  theme(legend.position = "none") +
+plotUMAP(sce6_postmnn, colour_by = "labelold", text_by = "label")
+```
+
+
+
+```{r}
+origclust <- igraph::cluster_louvain(g6dpf)$membership
+```
+
+```{r}
+library(bluster)
+library(pheatmap)
+```
+
+
+```{r}
+ratio <- pairwiseModularity(snngr56, clustersmnn56, as.ratio = TRUE)
+
+ratio_orig <- pairwiseModularity(g6dpf, origclust, as.ratio = TRUE)
+```
+
+Some caveats: the mnn56 graph and clustering involves more cells (55000) because it is a sum of 5 and 6 dpf data
+pairwise modularity is increased by bigger cluster sizes. But mnn56 has over twice as many clusters as the original (27 vs 13) and about twice as many cells (55k vs 24.5k)
+```{r}
+summary(diag(ratio_orig))
+summary(diag(ratio))
+```
+
+```{r}
+#pairwiseRand(clustersmnn, clustersmnn56, mode="ratio")
+```
+
+
+```{r}
+pheatmap(log10(ratio+1), cluster_cols=FALSE, cluster_rows=FALSE,
+    col=viridis::viridis(100), na_col = "white", border_color = NA, fontsize = 10, cellwidth=10,cellheight = 10)
+
+```
+
+```{r}
+pheatmap(log10(ratio_orig+1), cluster_cols=FALSE, cluster_rows=FALSE,
+    col=viridis::viridis(100), na_col = "white", border_color = NA, fontsize = 10, cellwidth=10,cellheight = 10)
+```
+
+
+#### Relationship pre- and post-MNN clusters
+
+This section needs to be cleaned up
+
+```{r}
+pre_post_clusters <- cbind(sce6dpf$label, sce6dpf$labelmnn)
+prepostdf <- as.data.frame(pre_post_clusters)
+```
+
+```{r}
+prepostdf$cellid <- as.vector(1:24653) 
+```
+
+```{r}
+pp2 <- prepostdf %>% 
+  gather(status, cluster, -cellid) %>% 
+  pivot_wider(names_from = cellid, values_from = cluster)
+```
+
+##### chisq test
+
+```{r}
+prepostdf$V1 <- as.character(prepostdf$V1)
+prepostdf$V2 <- as.character(prepostdf$V2)
+
+#table(prepostdf$V1) counts observations in each. adding prop.table() does as proportion. prop.table alone won't work because converted to char
+#some good stuff here https://rpubs.com/hoanganhngo610/558925
+
+#prop.table(table(prepostdf$V1))
+
+clusterpreposttable <- table(prepostdf$V1, prepostdf$V2)
+clusterpreposttable
+#prop.table(table(prepostdf$V1, prepostdf$V2))
+```
+
+```{r}
+chisq.test(table(prepostdf$V1, prepostdf$V2))
+```
+
+##### Uncertainty coefficient
+
+Now we're going to use DescTools package to find Thiel's uncertainty coefficient - nominal association
+```{r}
+DescTools::UncertCoef(table(prepostdf$V1, prepostdf$V2), direction = "symmetric") #direction = row or column, symmetric is averaged
+```
+the uncertainty coeff is \in[0,1] - knowing one clustering tells you 38% of the other clustering assignment
+
+
+
+##### Visualize association
+
+```{r}
+prepostfreq <- prepostdf %>% 
+  group_by(V1, V2) %>% 
+  summarise(Freq = n())
+
+prepostdf
+```
+```{r}
+ggplot(prepostfreq, aes(x=V1, y=Freq, fill=factor(V2)))+
+  geom_bar(stat="identity", position="fill")
+```
+```{r}
+prepost2 <- complete(prepostfreq, V1, nesting(V2), fill = list(Freq = 0)) 
+
+prepost2 %>% arrange(Freq)
+```
+
+New version. Need to convert to numeric prior to coerce to df otherwise the plot stays the same but the labels shift (so the values uncoupled)
+```{r}
+ppdf <- as.data.frame(prop.table(clusterpreposttable))
+#ppdf$Var1 <- as.numeric(ppdf$Var1)
+#ppdf$Var2 <- as.numeric(ppdf$Var2)
+
+ggplot(ppdf, aes(x = Var1, y = Var2, fill = Freq))+
+  geom_tile()+
+  theme_minimal()+
+  theme(panel.grid = element_blank(),
+        legend.position = "top",
+        panel.background = element_rect(fill="black"))+
+  labs(x="pre", y="post")+
+  scale_fill_viridis() #+
+  #scale_y_continuous(breaks = seq(1,27,1), expand = c(0,0))+
+  #scale_x_continuous(breaks = seq(1,13,1), expand = c(0,0))
+```
+
+Old version
+```{r}
+
+#got a little messed up because of as.character above. make v1,v2 numeric again here (scale_...disc to continuous)
+complete(prepostfreq, V1, nesting(V2), fill = list(Freq = 0)) %>% 
+  ggplot(aes(x = V1, y = V2, fill = log2(Freq)))+
+  geom_tile()+
+  theme_minimal()+
+  theme(panel.grid = element_blank(),
+        legend.position = "top",
+        panel.background = element_rect(fill="black"))+
+  labs(x="pre", y="post")+
+  scale_fill_viridis()+
+  scale_y_discrete(breaks = seq(1,27,1), expand = c(0,0))+
+  scale_x_discrete(breaks = seq(1,13,1), expand = c(0,0))
+```
+
+### conversion to other formats with sceasy 
+
+run these to convert singlecellexperiment to anndata for use with scanpy. more info here https://github.com/cellgeni/sceasy
+
+must have loomexperiment before sceasy
+```{r}
+#BiocManager::install("LoomExperiment") #sceasy depends
+#devtools::install_github("cellgeni/sceasy")
+
+library(LoomExperiment)
+library(sceasy)
+library(reticulate)
+loompy <- reticulate::import('loompy')
+```
+
+now convert to anndata 
+```{r}
+sceasy::convertFormat(mnn56, from="sce", to="anndata",
+                       outFile='MNN_integrated_Raj_5dpf_WBIS_6dpf.h5ad')
+```
+
+
+
+
+
+
+
+
+
